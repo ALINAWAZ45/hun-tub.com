@@ -1,0 +1,227 @@
+<?php
+/*
+Plugin Name: Movie Streamer (Single-file Starter)
+Description: Single-file starter plugin: registers a Movie CPT, simple meta fields and provides [movie_gallery] shortcode. Assets are inlined so you only need this one file. Safe to extend.
+Version: 1.0
+Author: Your Name
+Text Domain: movie-streamer
+*/
+
+if ( ! defined( 'ABSPATH' ) ) exit;
+
+class MS_Singlefile_Plugin {
+    public function __construct() {
+        add_action( 'init', array($this, 'register_cpt_and_tax') );
+        add_action( 'init', array($this, 'register_meta') );
+        add_action( 'add_meta_boxes', array($this, 'add_movie_metaboxes') );
+        add_action( 'save_post_movie', array($this, 'save_movie_meta') );
+        add_action( 'admin_enqueue_scripts', array($this, 'admin_assets') );
+        add_action( 'wp_enqueue_scripts', array($this, 'frontend_assets') );
+
+        add_shortcode( 'movie_gallery', array($this, 'shortcode_movie_gallery') );
+        add_action( 'wp_ajax_ms_load_movies', array($this, 'ajax_load_movies') );
+        add_action( 'wp_ajax_nopriv_ms_load_movies', array($this, 'ajax_load_movies') );
+    }
+
+    public function register_cpt_and_tax() {
+        $labels = array(
+            'name' => __('Movies','movie-streamer'),
+            'singular_name' => __('Movie','movie-streamer'),
+            'add_new_item' => __('Add New Movie','movie-streamer'),
+            'edit_item' => __('Edit Movie','movie-streamer'),
+            'new_item' => __('New Movie','movie-streamer'),
+            'view_item' => __('View Movie','movie-streamer'),
+        );
+        register_post_type('movie', array(
+            'labels' => $labels,
+            'public' => true,
+            'has_archive' => true,
+            'supports' => array('title','editor','thumbnail','excerpt'),
+            'rewrite' => array('slug'=>'movies'),
+            'show_in_rest' => true,
+            'menu_position' => 5,
+            'menu_icon' => 'dashicons-video-alt3',
+        ));
+
+        register_taxonomy('movie_genre', 'movie', array(
+            'labels'=> array('name'=>__('Genres','movie-streamer'),'singular_name'=>__('Genre','movie-streamer')),
+            'hierarchical' => true,
+            'show_in_rest' => true,
+            'rewrite' => array('slug'=>'genre')
+        ));
+
+        register_taxonomy('movie_year', 'movie', array(
+            'labels'=> array('name'=>__('Years','movie-streamer'),'singular_name'=>__('Year','movie-streamer')),
+            'hierarchical' => false,
+            'show_in_rest' => true,
+            'rewrite' => array('slug'=>'year')
+        ));
+    }
+
+    public function register_meta() {
+        register_post_meta('movie', 'ms_video_url', array(
+            'type' => 'string', 'single' => true, 'show_in_rest' => true,
+            'sanitize_callback' => 'esc_url_raw',
+            'auth_callback' => function() { return current_user_can('edit_posts'); },
+        ));
+        register_post_meta('movie', 'ms_poster', array('type' => 'integer','single' => true,'show_in_rest' => true,'sanitize_callback' => 'absint'));
+        register_post_meta('movie', 'ms_duration', array('type' => 'string','single' => true,'show_in_rest' => true,'sanitize_callback' => 'sanitize_text_field'));
+        register_post_meta('movie', 'ms_rating', array('type' => 'number','single' => true,'show_in_rest' => true,'sanitize_callback' => 'floatval'));
+    }
+
+    public function add_movie_metaboxes() {
+        add_meta_box('ms_movie_details','Movie Details', array($this,'render_movie_metabox'), 'movie', 'normal', 'high');
+    }
+
+    public function render_movie_metabox($post) {
+        wp_nonce_field('ms_save_movie', 'ms_movie_nonce');
+
+        $video_url = get_post_meta($post->ID,'ms_video_url',true);
+        $poster_id = get_post_meta($post->ID,'ms_poster',true);
+        $duration = get_post_meta($post->ID,'ms_duration',true);
+        $rating = get_post_meta($post->ID,'ms_rating',true);
+        $poster_url = $poster_id ? wp_get_attachment_url($poster_id) : '';
+        ?>
+        <p>
+            <label><?php _e('Video URL (MP4 / HLS / external):','movie-streamer'); ?></label><br/>
+            <input type="url" name="ms_video_url" value="<?php echo esc_attr($video_url); ?>" style="width:100%;" />
+        </p>
+        <p>
+            <label><?php _e('Poster (upload via Media Library):','movie-streamer'); ?></label><br/>
+            <input type="hidden" name="ms_poster" id="ms_poster_field" value="<?php echo esc_attr($poster_id); ?>" />
+            <img id="ms_poster_preview" src="<?php echo esc_attr($poster_url); ?>" style="max-width:200px;display:block;margin-bottom:8px;" />
+            <button class="button" id="ms_upload_poster"><?php _e('Choose / Upload Poster','movie-streamer'); ?></button>
+            <button class="button" id="ms_remove_poster" style="display:<?php echo $poster_id ? 'inline-block':'none'; ?>;"><?php _e('Remove','movie-streamer'); ?></button>
+        </p>
+        <p>
+            <label><?php _e('Duration (e.g. 01:45:00):','movie-streamer'); ?></label><br/>
+            <input type="text" name="ms_duration" value="<?php echo esc_attr($duration); ?>" />
+        </p>
+        <p>
+            <label><?php _e('Rating (0-10):','movie-streamer'); ?></label><br/>
+            <input type="number" step="0.1" min="0" max="10" name="ms_rating" value="<?php echo esc_attr($rating); ?>" />
+        </p>
+        <?php
+    }
+
+    public function save_movie_meta($post_id) {
+        if ( ! isset($_POST['ms_movie_nonce']) || ! wp_verify_nonce( $_POST['ms_movie_nonce'], 'ms_save_movie' ) ) return;
+        if ( defined('DOING_AUTOSAVE') && DOING_AUTOSAVE ) return;
+        if ( ! current_user_can('edit_post', $post_id) ) return;
+
+        if ( isset($_POST['ms_video_url']) ) update_post_meta($post_id,'ms_video_url', esc_url_raw($_POST['ms_video_url']) );
+        if ( isset($_POST['ms_poster']) ) update_post_meta($post_id,'ms_poster', absint($_POST['ms_poster']) );
+        if ( isset($_POST['ms_duration']) ) update_post_meta($post_id,'ms_duration', sanitize_text_field($_POST['ms_duration']) );
+        if ( isset($_POST['ms_rating']) ) update_post_meta($post_id,'ms_rating', floatval($_POST['ms_rating']) );
+    }
+
+    public function admin_assets($hook) {
+        global $post_type;
+        if ( $post_type !== 'movie' ) return;
+        wp_enqueue_media();
+        // enqueue a small handle to attach inline scripts/styles
+        wp_enqueue_script('ms-admin-handle', '', array('jquery'), '1.0', true);
+        wp_add_inline_script('ms-admin-handle', $this->admin_js());
+        wp_enqueue_style('ms-admin-style');
+        wp_add_inline_style('ms-admin-style', $this->admin_css());
+    }
+
+    public function frontend_assets() {
+        // handle for inline assets
+        wp_enqueue_script('ms-frontend-handle', '', array('jquery'), '1.0', true);
+        wp_add_inline_script('ms-frontend-handle', $this->frontend_js());
+        wp_enqueue_style('ms-frontend-style');
+        wp_add_inline_style('ms-frontend-style', $this->frontend_css());
+
+        wp_localize_script('ms-frontend-handle', 'ms_ajax', array(
+            'ajax_url' => admin_url('admin-ajax.php'),
+            'nonce'    => wp_create_nonce('ms_load_movies'),
+        ));
+    }
+
+    public function admin_js() {
+        return "jQuery(function($){\nvar frame;\n$('#ms_upload_poster').on('click', function(e){ e.preventDefault(); if (frame) frame.open(); frame = wp.media({ title: 'Select Poster', button: { text: 'Select' }, multiple: false }); frame.on('select', function(){ var attachment = frame.state().get('selection').first().toJSON(); $('#ms_poster_field').val(attachment.id); $('#ms_poster_preview').attr('src', attachment.url).show(); $('#ms_remove_poster').show(); }); frame.open(); }); $('#ms_remove_poster').on('click', function(e){ e.preventDefault(); $('#ms_poster_field').val(''); $('#ms_poster_preview').attr('src','').hide(); $(this).hide(); }); });";
+    }
+
+    public function admin_css() {
+        return "#ms_poster_preview{ max-width:200px; height:auto; display:block; margin-bottom:8px; }";
+    }
+
+    public function frontend_js() {
+        return "jQuery(function($){\n$(document).on('click', '.ms-movie-card', function(){ var video = $(this).data('video'); var title = $(this).data('title'); if (!video) return alert('No video set for this movie.'); $('#ms-modal-title').text(title); var html = ''; if (video.indexOf('.m3u8') !== -1) { html = '<video controls autoplay style=\"width:100%;max-height:60vh;\"><source src=\"'+video+'\"></video>'; } else { html = '<video controls autoplay style=\"width:100%;max-height:60vh;\"><source src=\"'+video+'\"></video>'; } $('#ms-modal-player').html(html); $('#ms-player-modal').fadeIn(); }); $(document).on('click', '.ms-modal-close', function(){ $('#ms-player-modal').fadeOut(function(){ $('#ms-modal-player').html(''); }); }); });";
+    }
+
+    public function frontend_css() {
+        return ".ms-movie-grid { display:flex; flex-wrap:wrap; gap:16px; } .ms-movie-card { width:calc(25% - 12px); cursor:pointer; overflow:hidden; border-radius:8px; box-shadow:0 2px 6px rgba(0,0,0,0.1); background:#fff; } @media(max-width:900px){ .ms-movie-card{ width:calc(33.333% - 12px);} } @media(max-width:600px){ .ms-movie-card{ width:calc(50% - 12px);} } .ms-poster{ background-size:cover; background-position:center; padding-top:56.25%; } .ms-movie-title{ padding:8px; font-size:14px; margin:0; } .ms-modal{ position:fixed; left:0; top:0; right:0; bottom:0; background:rgba(0,0,0,0.75); display:flex; align-items:center; justify-content:center; z-index:99999; } .ms-modal-inner{ width:90%; max-width:900px; background:#fff; padding:16px; border-radius:8px; position:relative; } .ms-modal-close{ position:absolute; right:8px; top:8px; border:0; background:transparent; font-size:26px; line-height:1; cursor:pointer; }";
+    }
+
+    public function shortcode_movie_gallery($atts) {
+        $atts = shortcode_atts(array('per_page' => 12,'genre' => '',), $atts, 'movie_gallery');
+        ob_start();
+        ?>
+        <div class="ms-movie-gallery" data-per-page="<?php echo esc_attr($atts['per_page']); ?>" data-genre="<?php echo esc_attr($atts['genre']); ?>">
+            <div class="ms-movie-grid" id="ms-movie-grid">
+                <?php
+                $args = array('post_type' => 'movie','posts_per_page' => intval($atts['per_page']),);
+                if ( ! empty($atts['genre']) ) $args['tax_query'] = array(array('taxonomy'=>'movie_genre','field'=>'slug','terms'=>sanitize_text_field($atts['genre'])));
+                $q = new WP_Query($args);
+                if ( $q->have_posts() ) :
+                    while ( $q->have_posts() ) : $q->the_post();
+                        $video = get_post_meta(get_the_ID(),'ms_video_url',true);
+                        $poster_id = get_post_meta(get_the_ID(),'ms_poster',true);
+                        $poster = $poster_id ? wp_get_attachment_url($poster_id) : get_the_post_thumbnail_url(get_the_ID(),'medium');
+                        ?>
+                        <div class="ms-movie-card" data-video="<?php echo esc_attr($video); ?>" data-title="<?php echo esc_attr(get_the_title()); ?>">
+                            <div class="ms-poster" style="background-image:url('<?php echo esc_url($poster); ?>');"></div>
+                            <h3 class="ms-movie-title"><?php echo esc_html(get_the_title()); ?></h3>
+                        </div>
+                        <?php
+                    endwhile;
+                    wp_reset_postdata();
+                else:
+                    echo '<p class="ms-no-movies">No movies found.</p>';
+                endif;
+                ?>
+            </div>
+
+            <div id="ms-player-modal" class="ms-modal" style="display:none;">
+                <div class="ms-modal-inner">
+                    <button class="ms-modal-close">×</button>
+                    <h2 id="ms-modal-title"></h2>
+                    <div id="ms-modal-player"></div>
+                </div>
+            </div>
+        </div>
+        <?php
+        return ob_get_clean();
+    }
+
+    public function ajax_load_movies() {
+        check_ajax_referer('ms_load_movies','nonce');
+        $paged = isset($_POST['paged']) ? intval($_POST['paged']) : 1;
+        $per = isset($_POST['per']) ? intval($_POST['per']) : 12;
+        $genre = isset($_POST['genre']) ? sanitize_text_field($_POST['genre']) : '';
+
+        $args = array('post_type'=>'movie','posts_per_page'=>$per,'paged'=>$paged);
+        if ( $genre ) $args['tax_query'] = array(array('taxonomy'=>'movie_genre','field'=>'slug','terms'=>$genre));
+
+        $q = new WP_Query($args);
+        $items = '';
+        if ( $q->have_posts() ) {
+            while ( $q->have_posts() ) { $q->the_post();
+                $video = get_post_meta(get_the_ID(),'ms_video_url',true);
+                $poster_id = get_post_meta(get_the_ID(),'ms_poster',true);
+                $poster = $poster_id ? wp_get_attachment_url($poster_id) : get_the_post_thumbnail_url(get_the_ID(),'medium');
+                $items .= '<div class="ms-movie-card" data-video="'.esc_attr($video).'" data-title="'.esc_attr(get_the_title()).'">\n                    <div class="ms-poster" style="background-image:url('.esc_url($poster).');"></div>\n                    <h3 class="ms-movie-title">'.esc_html(get_the_title()).'</h3>\n                </div>';
+            }
+            wp_reset_postdata();
+        }
+
+        wp_send_json_success(array('html'=>$items));
+    }
+
+}
+
+new MS_Singlefile_Plugin();
+
+?>
